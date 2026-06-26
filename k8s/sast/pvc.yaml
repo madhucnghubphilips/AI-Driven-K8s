@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: source-code-pvc
+  namespace: security-scanning
+  labels:
+    app.kubernetes.io/name: ai-driven-k8s
+    app.kubernetes.io/component: sast
+spec:
+  accessModes:
+    - ReadOnlyMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: standard

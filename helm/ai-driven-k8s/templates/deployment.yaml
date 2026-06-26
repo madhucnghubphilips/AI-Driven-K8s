@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-analyzer
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: ai-driven-k8s
+    app.kubernetes.io/component: ai-analyzer
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
+spec:
+  replicas: {{ .Values.aiAnalyzer.replicas }}
+  selector:
+    matchLabels:
+      app: ai-analyzer
+  template:
+    metadata:
+      labels:
+        app: ai-analyzer
+    spec:
+      serviceAccountName: security-scanner
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: ai-analyzer
+          image: "{{ .Values.aiAnalyzer.image.repository }}:{{ .Values.aiAnalyzer.image.tag }}"
+          imagePullPolicy: {{ .Values.aiAnalyzer.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.aiAnalyzer.service.port }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.aiAnalyzer.service.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.aiAnalyzer.service.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.aiAnalyzer.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

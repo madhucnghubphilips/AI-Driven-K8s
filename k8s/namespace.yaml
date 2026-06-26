@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: security-scanning
+  labels:
+    app.kubernetes.io/name: ai-driven-k8s
+    app.kubernetes.io/component: security

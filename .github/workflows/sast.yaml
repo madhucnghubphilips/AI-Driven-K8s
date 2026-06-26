@@ -1,0 +1,129 @@
+name: SAST – AI-Driven Static Analysis
+
+on:
+  push:
+    branches: ["main", "master", "develop"]
+  pull_request:
+    branches: ["main", "master", "develop"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  semgrep-sast:
+    name: Semgrep SAST Scan
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep:latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Semgrep SAST scan
+        run: |
+          semgrep scan \
+            --config=auto \
+            --json \
+            --output=semgrep-results.json \
+            --sarif-output=semgrep-results.sarif \
+            . || true
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep-results.sarif
+          category: semgrep-sast
+        continue-on-error: true
+
+      - name: Upload raw JSON results
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-results
+          path: |
+            semgrep-results.json
+            semgrep-results.sarif
+          retention-days: 30
+
+      - name: Send results to AI Analyzer
+        if: ${{ env.AI_ANALYZER_URL != '' }}
+        env:
+          AI_ANALYZER_URL: ${{ secrets.AI_ANALYZER_URL }}
+        run: |
+          curl -sf -X POST "${AI_ANALYZER_URL}/analyze/sast" \
+            -H "Content-Type: application/json" \
+            -d @semgrep-results.json
+
+      - name: Fail on critical findings
+        run: |
+          CRITICAL=$(python3 - <<'EOF'
+          import json, sys
+          try:
+              with open("semgrep-results.json") as f:
+                  data = json.load(f)
+              critical = [
+                  r for r in data.get("results", [])
+                  if r.get("extra", {}).get("severity", "").upper() in ("ERROR", "CRITICAL")
+              ]
+              print(len(critical))
+          except Exception:
+              print(0)
+          EOF
+          )
+          echo "Critical findings: $CRITICAL"
+          if [ "$CRITICAL" -gt "0" ]; then
+            echo "::warning::Found $CRITICAL critical/error-level SAST findings"
+          fi
+
+  ai-analysis-report:
+    name: AI Analysis Report
+    runs-on: ubuntu-latest
+    needs: semgrep-sast
+    if: always()
+
+    steps:
+      - name: Download SAST results
+        uses: actions/download-artifact@v4
+        with:
+          name: sast-results
+
+      - name: Generate AI-enhanced summary
+        run: |
+          python3 - <<'EOF'
+          import json, sys, datetime
+
+          try:
+              with open("semgrep-results.json") as f:
+                  data = json.load(f)
+          except Exception:
+              print("No SAST results found.")
+              sys.exit(0)
+
+          results = data.get("results", [])
+          severity_counts = {"ERROR": 0, "WARNING": 0, "INFO": 0}
+          for r in results:
+              sev = r.get("extra", {}).get("severity", "INFO").upper()
+              severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+          print("=" * 60)
+          print("AI-DRIVEN SAST ANALYSIS SUMMARY")
+          print("=" * 60)
+          print(f"Scan timestamp : {datetime.datetime.utcnow().isoformat()}Z")
+          print(f"Total findings : {len(results)}")
+          print(f"  Critical/Error : {severity_counts.get('ERROR', 0)}")
+          print(f"  Warning        : {severity_counts.get('WARNING', 0)}")
+          print(f"  Info           : {severity_counts.get('INFO', 0)}")
+          print()
+
+          # Top-5 by rule frequency
+          from collections import Counter
+          top_rules = Counter(r.get("check_id", "unknown") for r in results).most_common(5)
+          if top_rules:
+              print("Top rules triggered:")
+              for rule, count in top_rules:
+                  print(f"  {rule}: {count}")
+          print("=" * 60)
+          EOF

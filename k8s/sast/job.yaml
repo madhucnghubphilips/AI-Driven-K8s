@@ -1,0 +1,110 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: semgrep-config
+  namespace: security-scanning
+  labels:
+    app.kubernetes.io/name: ai-driven-k8s
+    app.kubernetes.io/component: sast
+data:
+  semgrep-rules.yaml: |
+    rules:
+      - id: dangerous-exec
+        patterns:
+          - pattern: exec($CMD, ...)
+        message: Dangerous exec call with user input
+        languages: [python]
+        severity: ERROR
+      - id: sql-injection
+        patterns:
+          - pattern: |
+              $QUERY = "..." + $INPUT
+              $DB.execute($QUERY)
+        message: Potential SQL injection vulnerability
+        languages: [python]
+        severity: ERROR
+      - id: hardcoded-secret
+        patterns:
+          - pattern: $VAR = "password123"
+          - pattern: $VAR = "secret123"
+        message: Hardcoded secret detected
+        languages: [python, javascript, go]
+        severity: WARNING
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sast-scan
+  namespace: security-scanning
+  labels:
+    app.kubernetes.io/name: ai-driven-k8s
+    app.kubernetes.io/component: sast
+    scan-type: sast
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ai-driven-k8s
+        app.kubernetes.io/component: sast
+    spec:
+      serviceAccountName: security-scanner
+      restartPolicy: Never
+      containers:
+        - name: semgrep
+          image: returntocorp/semgrep:latest
+          imagePullPolicy: Always
+          command:
+            - semgrep
+            - scan
+            - --config=auto
+            - --json
+            - --output=/results/sast-results.json
+            - /src
+          env:
+            - name: SEMGREP_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: semgrep-secrets
+                  key: app-token
+                  optional: true
+          volumeMounts:
+            - name: source-code
+              mountPath: /src
+              readOnly: true
+            - name: results
+              mountPath: /results
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 2Gi
+        - name: results-uploader
+          image: curlimages/curl:latest
+          command:
+            - sh
+            - -c
+            - |
+              until [ -f /results/sast-results.json ]; do sleep 5; done
+              curl -X POST http://ai-analyzer-service:8080/analyze/sast \
+                -H "Content-Type: application/json" \
+                -d @/results/sast-results.json
+          volumeMounts:
+            - name: results
+              mountPath: /results
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: source-code
+          persistentVolumeClaim:
+            claimName: source-code-pvc
+        - name: results
+          emptyDir: {}
+  backoffLimit: 2

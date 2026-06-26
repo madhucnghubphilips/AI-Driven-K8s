@@ -1,0 +1,176 @@
+name: DAST – AI-Driven Dynamic Analysis
+
+on:
+  push:
+    branches: ["main", "master"]
+  schedule:
+    # Run nightly at 02:00 UTC
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: "Target URL for DAST scan"
+        required: true
+        default: "http://localhost:8080"
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  zap-dast:
+    name: OWASP ZAP DAST Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set target URL
+        id: target
+        run: |
+          TARGET="${{ github.event.inputs.target_url }}"
+          if [ -z "$TARGET" ]; then
+            TARGET="${{ secrets.DAST_TARGET_URL }}"
+          fi
+          if [ -z "$TARGET" ]; then
+            echo "No DAST target URL configured. Skipping scan."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "url=$TARGET" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: ZAP Baseline Scan
+        if: steps.target.outputs.skip == 'false'
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: ${{ steps.target.outputs.url }}
+          rules_file_name: ".zap/rules.tsv"
+          cmd_options: "-J zap-results.json -r zap-report.html"
+          fail_action: false
+
+      - name: Upload ZAP results
+        if: steps.target.outputs.skip == 'false'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-results
+          path: |
+            zap-results.json
+            zap-report.html
+          retention-days: 30
+
+      - name: Upload SARIF to GitHub Security tab
+        if: steps.target.outputs.skip == 'false'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results/zap.sarif
+          category: zap-dast
+        continue-on-error: true
+
+      - name: Send results to AI Analyzer
+        if: ${{ steps.target.outputs.skip == 'false' && env.AI_ANALYZER_URL != '' }}
+        env:
+          AI_ANALYZER_URL: ${{ secrets.AI_ANALYZER_URL }}
+        run: |
+          if [ -f zap-results.json ]; then
+            curl -sf -X POST "${AI_ANALYZER_URL}/analyze/dast" \
+              -H "Content-Type: application/json" \
+              -d @zap-results.json
+          fi
+
+      - name: Generate AI-enhanced DAST summary
+        if: steps.target.outputs.skip == 'false'
+        run: |
+          python3 - <<'EOF'
+          import json, sys, datetime
+
+          try:
+              with open("zap-results.json") as f:
+                  data = json.load(f)
+          except Exception:
+              print("No DAST results found.")
+              sys.exit(0)
+
+          risk_counts = {"High": 0, "Medium": 0, "Low": 0, "Informational": 0}
+          total = 0
+          for site in data.get("site", []):
+              for alert in site.get("alerts", []):
+                  risk = alert.get("riskdesc", "Low").split()[0]
+                  risk_counts[risk] = risk_counts.get(risk, 0) + 1
+                  total += len(alert.get("instances", [{}]))
+
+          print("=" * 60)
+          print("AI-DRIVEN DAST ANALYSIS SUMMARY")
+          print("=" * 60)
+          print(f"Scan timestamp : {datetime.datetime.utcnow().isoformat()}Z")
+          print(f"Total instances: {total}")
+          for risk, count in risk_counts.items():
+              print(f"  {risk:<20}: {count}")
+          print("=" * 60)
+          EOF
+
+  ai-correlation:
+    name: AI Correlation – SAST + DAST
+    runs-on: ubuntu-latest
+    needs: zap-dast
+    if: always()
+
+    steps:
+      - name: Download all scan artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+
+      - name: Correlate findings across SAST and DAST
+        run: |
+          python3 - <<'EOF'
+          import json, os, glob
+
+          sast_rules = set()
+          dast_alerts = set()
+
+          # Load any SAST results present
+          for path in glob.glob("**/semgrep-results.json", recursive=True):
+              try:
+                  with open(path) as f:
+                      data = json.load(f)
+                  for r in data.get("results", []):
+                      sast_rules.add(r.get("check_id", ""))
+              except Exception:
+                  pass
+
+          # Load any DAST results present
+          for path in glob.glob("**/zap-results.json", recursive=True):
+              try:
+                  with open(path) as f:
+                      data = json.load(f)
+                  for site in data.get("site", []):
+                      for alert in site.get("alerts", []):
+                          dast_alerts.add(alert.get("alert", ""))
+              except Exception:
+                  pass
+
+          print("AI CORRELATION REPORT")
+          print(f"SAST unique rules   : {len(sast_rules)}")
+          print(f"DAST unique alerts  : {len(dast_alerts)}")
+
+          # Simple keyword overlap heuristic
+          overlap = []
+          keywords = {
+              "SQL Injection": ["sql", "injection"],
+              "XSS": ["xss", "cross-site", "script"],
+              "Path Traversal": ["path", "traversal"],
+              "Command Injection": ["command", "exec"],
+          }
+          for vuln_class, kws in keywords.items():
+              in_sast = any(any(k in r.lower() for k in kws) for r in sast_rules)
+              in_dast = any(any(k in a.lower() for k in kws) for a in dast_alerts)
+              if in_sast and in_dast:
+                  overlap.append(vuln_class)
+
+          if overlap:
+              print(f"Correlated findings (in both SAST & DAST): {', '.join(overlap)}")
+          else:
+              print("No correlated vulnerability classes detected.")
+          EOF
