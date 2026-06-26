@@ -1,0 +1,5 @@
+streamlit>=1.36
+pandas>=2.0
+pyyaml>=6.0
+requests>=2.31
+reportlab>=4.0

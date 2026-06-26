@@ -1,0 +1,223 @@
+{{- /*
+  KubeSentinel Test: Malicious Helm Chart Template
+  Intentionally insecure — triggers all Helm + K8s container security rules.
+  Upload this file (along with malicious-helm-values.yaml) on the Helm scan page.
+  DO NOT deploy to any real cluster.
+*/ -}}
+
+---
+# ── Privileged Pod — triggers container privilege + host access rules ────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "malicious-pod"
+  namespace: "default"
+  labels:
+    app: "malicious"
+    chart: {{ .Chart.Name | quote }}
+spec:
+  # MISCONFIG: host namespaces
+  hostNetwork: true
+  hostPID: true
+  hostIPC: true
+
+  # MISCONFIG: default service account, token auto-mounted
+  serviceAccountName: default
+  automountServiceAccountToken: true
+
+  # MISCONFIG: no seccomp profile
+  securityContext: {}
+
+  initContainers:
+    - name: privileged-init
+      image: busybox:latest             # MISCONFIG: latest tag, public registry
+      command: ["sh", "-c", "chroot /host"]
+      securityContext:
+        privileged: true               # MISCONFIG: privileged init container
+        runAsUser: 0
+        allowPrivilegeEscalation: true
+      volumeMounts:
+        - name: host-root
+          mountPath: /host
+
+  containers:
+    - name: attacker
+      image: ubuntu:latest             # MISCONFIG: latest tag, public registry, no digest
+
+      # MISCONFIG: fully privileged
+      securityContext:
+        privileged: true
+        runAsUser: 0                   # MISCONFIG: root
+        runAsNonRoot: false
+        allowPrivilegeEscalation: true
+        readOnlyRootFilesystem: false  # MISCONFIG: writable FS
+        capabilities:
+          add:
+            - ALL                      # MISCONFIG: all capabilities
+            - NET_ADMIN
+            - SYS_PTRACE
+          drop: []                     # MISCONFIG: nothing dropped
+
+      # MISCONFIG: hardcoded secrets in env vars
+      env:
+        - name: DB_PASSWORD
+          value: "supersecretpassword123"
+        - name: AWS_SECRET_ACCESS_KEY
+          value: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        - name: API_TOKEN
+          value: "tok_live_hardcoded_12345"
+        - name: DATABASE_CREDENTIAL
+          value: "root:admin1234@mysql:3306"
+
+      # MISCONFIG: exposes port directly on host
+      ports:
+        - containerPort: 4444
+          hostPort: 4444             # MISCONFIG: hostPort binding
+
+      # MISCONFIG: no resource limits or requests
+      resources: {}
+
+      # MISCONFIG: no liveness / readiness probes
+
+      # MISCONFIG: TTY enabled (interactive shell access)
+      tty: true
+      stdin: true
+
+      volumeMounts:
+        - name: host-root
+          mountPath: /host
+        - name: docker-sock
+          mountPath: /var/run/docker.sock
+
+  volumes:
+    - name: host-root
+      hostPath:
+        path: /                        # MISCONFIG: full host root mounted
+        type: Directory
+    - name: docker-sock
+      hostPath:
+        path: /var/run/docker.sock    # MISCONFIG: docker socket mounted
+        type: Socket
+
+---
+# ── Deployment — triggers RBAC + resource + replica rules ────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: "bad-deployment"
+  namespace: "default"
+spec:
+  replicas: 1                          # MISCONFIG: single replica (no HA)
+
+  selector:
+    matchLabels:
+      app: "bad-app"
+
+  template:
+    metadata:
+      labels:
+        app: "bad-app"
+    spec:
+      hostNetwork: true                # MISCONFIG
+      serviceAccountName: default      # MISCONFIG: default SA
+      automountServiceAccountToken: true
+
+      containers:
+        - name: bad-app
+          image: alpine                # MISCONFIG: no tag, public registry
+
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: false
+            capabilities:
+              add: ["SYS_PTRACE", "NET_ADMIN", "SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE"]
+
+          env:
+            - name: SECRET_KEY
+              value: "hardcoded_secret_value_xyz"
+            - name: DB_PASSWORD
+              value: "admin1234"
+
+          resources: {}               # MISCONFIG: no limits
+
+          # MISCONFIG: no liveness/readiness probes
+
+          volumeMounts:
+            - name: host-proc
+              mountPath: /proc        # MISCONFIG: /proc mounted
+
+      volumes:
+        - name: host-proc
+          hostPath:
+            path: /proc               # MISCONFIG: host /proc exposed
+
+---
+# ── ClusterRoleBinding — cluster-admin for default SA ────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: "cluster-admin-binding"
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: "default"
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin                  # MISCONFIG: cluster-admin role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ── ConfigMap with embedded secrets ──────────────────────────────────────────
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "bad-config"
+  namespace: "default"
+data:
+  # MISCONFIG: secrets stored in ConfigMap
+  db_password: "configmap_password_123"
+  api_secret: "configmap_api_secret_abc"
+  app.properties: |
+    database.password=configmap_hardcoded_pass
+    jwt.secret=jwt_secret_from_configmap
+
+---
+# ── DaemonSet — runs privileged on every node ─────────────────────────────────
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: "bad-daemonset"
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: "bad-daemon"
+  template:
+    metadata:
+      labels:
+        app: "bad-daemon"
+    spec:
+      hostNetwork: true                # MISCONFIG
+      hostPID: true                    # MISCONFIG
+
+      containers:
+        - name: daemon
+          image: gcr.io/google-containers/pause:latest   # MISCONFIG: latest tag
+
+          securityContext:
+            privileged: true           # MISCONFIG
+            runAsUser: 0
+            allowPrivilegeEscalation: true
+
+          resources: {}               # MISCONFIG: no limits
+
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /                    # MISCONFIG: root FS

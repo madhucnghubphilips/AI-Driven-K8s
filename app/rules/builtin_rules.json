@@ -1,0 +1,34 @@
+{
+  "rules": [
+    {
+      "id": "K8S-CTR-PRIVILEGED",
+      "severity": "Critical",
+      "category": "Pod security",
+      "description": "Detects privileged containers."
+    },
+    {
+      "id": "K8S-CTR-PRIV-ESC",
+      "severity": "High",
+      "category": "Pod security",
+      "description": "Detects containers where privilege escalation is not disabled."
+    },
+    {
+      "id": "K8S-RBAC-CLUSTER-ADMIN",
+      "severity": "Critical",
+      "category": "RBAC",
+      "description": "Detects bindings to cluster-admin."
+    },
+    {
+      "id": "TF-EKS-PUBLIC-ENDPOINT",
+      "severity": "High",
+      "category": "EKS",
+      "description": "Detects public EKS API endpoint configuration."
+    },
+    {
+      "id": "AUDIT-POD-REMOTE-ACCESS",
+      "severity": "High",
+      "category": "Audit logs",
+      "description": "Detects pod exec, attach, and port-forward audit events."
+    }
+  ]
+}
