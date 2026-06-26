@@ -6,6 +6,14 @@ metadata:
   labels:
     app.kubernetes.io/name: ai-driven-k8s
     app.kubernetes.io/component: sast
+  annotations:
+    # This PVC must be pre-populated with the source code to be scanned.
+    # Recommended approaches:
+    #   1. Use an init Job or CI step to clone the repository into the volume.
+    #   2. Mount a pre-existing ReadOnlyMany NFS/CephFS volume that already
+    #      contains the checked-out source tree.
+    #   3. Replace this PVC with an emptyDir + initContainer that clones the
+    #      repository at runtime (see the SAST job's initContainers section).
 spec:
   accessModes:
     - ReadOnlyMany

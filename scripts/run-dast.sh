@@ -53,9 +53,13 @@ kubectl wait --for=condition=complete \
 
 echo "==> DAST scan complete. Fetching results from AI Analyzer..."
 kubectl run -it --rm result-fetcher \
-  --image=curlimages/curl:latest \
+  --image=python:3.12-slim \
   --restart=Never \
   --namespace="$NAMESPACE" \
-  -- curl -sf "http://ai-analyzer-service:8080/findings?scan_type=dast" | python3 -m json.tool
+  -- python3 -c "
+import urllib.request, json
+resp = urllib.request.urlopen('http://ai-analyzer-service:8080/findings?scan_type=dast')
+print(json.dumps(json.loads(resp.read()), indent=2))
+"
 
 echo "==> Done."
